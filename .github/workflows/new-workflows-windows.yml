@@ -17,9 +17,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: D:\persistent
-          key: new-vm-persistent-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vm-persistent-windows-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            new-vm-persistent-windows-
+            vm-persistent-windows-
 
       # 2. Install pnpm by default (non-persistent)
       - name: Pre-install Dependencies (pnpm)
