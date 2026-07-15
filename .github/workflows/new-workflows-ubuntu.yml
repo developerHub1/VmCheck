@@ -1,0 +1,128 @@
+name: new workflows ubuntu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # 1. Restore the persistent drive (Carries over Chrome and Antigravity IDE config)
+      - name: Restore persistent drive
+        uses: actions/cache@v4
+        with:
+          path: ~/persistent
+          key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            new-vm-persistent-ubuntu-
+
+      # 2. Install desktop + VNC + noVNC
+      - name: Install desktop + VNC + noVNC
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify
+
+      # 3. Pre-install Dependencies (pnpm) (non-persistent)
+      - name: Pre-install Dependencies (pnpm)
+        run: |
+          curl -fsSL https://get.pnpm.io/install.sh | sh -
+          # Export pnpm path for subsequent steps
+          echo "$HOME/.local/share/pnpm" >> $GITHUB_PATH
+
+      # 4. Configure Session Persistence
+      - name: Configure Session Persistence
+        run: |
+          # Ensure all target folders inside our persistent volume exist
+          mkdir -p ~/persistent/chrome-profile
+          mkdir -p ~/persistent/antigravity-ide
+          
+          # Link Antigravity IDE configuration directory to persistent path
+          mkdir -p ~/.gemini
+          if [ ! -L ~/.gemini/antigravity-ide ]; then
+            ln -sf ~/persistent/antigravity-ide ~/.gemini/antigravity-ide
+            echo "✅ Linked Antigravity IDE directory to persistent storage."
+          fi
+
+          # Create XFCE Desktop shortcut for Persistent Chrome
+          mkdir -p ~/Desktop
+          echo "[Desktop Entry]" > ~/Desktop/chrome.desktop
+          echo "Version=1.0" >> ~/Desktop/chrome.desktop
+          echo "Type=Application" >> ~/Desktop/chrome.desktop
+          echo "Name=Persistent Chrome" >> ~/Desktop/chrome.desktop
+          echo "Comment=Launches Chrome with a persistent profile" >> ~/Desktop/chrome.desktop
+          echo "Exec=google-chrome --user-data-dir=/home/runner/persistent/chrome-profile --no-sandbox" >> ~/Desktop/chrome.desktop
+          echo "Icon=google-chrome" >> ~/Desktop/chrome.desktop
+          echo "Terminal=false" >> ~/Desktop/chrome.desktop
+          echo "StartupNotify=true" >> ~/Desktop/chrome.desktop
+          chmod +x ~/Desktop/chrome.desktop
+          echo "✅ Created 'Persistent Chrome' shortcut on Desktop."
+
+      # 5. Start VNC server
+      - name: Start VNC server
+        run: |
+          mkdir -p ~/.vnc
+          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          vncserver :1 -geometry 1280x720 -depth 24
+        env:
+          USER: runner
+
+      # 6. Start noVNC
+      - name: Start noVNC
+        run: |
+          websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+
+      # 7. Start Cloudflare Tunnel
+      - name: Start Cloudflare Tunnel
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cloudflared.log &
+          sleep 8
+          echo "========================================"
+          echo "OPEN THIS URL:"
+          grep -o 'https://.*\.trycloudflare\.com' /tmp/cloudflared.log | head -1 | sed 's|$|/vnc.html|'
+          echo "========================================"
+
+      # 8. Keep alive + auto-restart
+      - name: Keep alive + auto-restart
+        run: |
+          mkdir -p ~/persistent
+
+          # Check for manual stop file (touch ~/persistent/STOP to gracefully exit)
+          while true; do
+            if [ -f ~/persistent/STOP ]; then
+              echo "🛑 STOP file detected, shutting down..."
+              rm ~/persistent/STOP
+              exit 0
+            fi
+
+            # Ensure websockify and cloudflared are running
+            if ! pgrep -f websockify > /dev/null; then
+              echo "⚠️ websockify died, restarting..."
+              websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+              sleep 2
+            fi
+
+            if ! pgrep -f cloudflared > /dev/null; then
+              echo "⚠️ cloudflared died, restarting..."
+              ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cloudflared.log &
+              sleep 8
+              echo "========================================"
+              echo "NEW URL:"
+              grep -o 'https://.*\.trycloudflare\.com' /tmp/cloudflared.log | head -1 | sed 's|$|/vnc.html|'
+              echo "========================================"
+            fi
+
+            sleep 10
+          done
+
+      # 9. Save the updated persistent volume (Includes Chrome and Antigravity IDE configuration)
+      - name: Save persistent drive
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/persistent
+          key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
