@@ -21,7 +21,31 @@ jobs:
           restore-keys: |
             vm-persistent-windows-
 
-      # 2. Install pnpm by default (non-persistent)
+      # 2. Uninstall Microsoft Edge to prevent resource usage/interference
+      - name: Uninstall Microsoft Edge
+        run: |
+          $setupPaths = @(
+            "C:\Program Files (x86)\Microsoft\Edge\Application\*\Installer\setup.exe",
+            "C:\Program Files\Microsoft\Edge\Application\*\Installer\setup.exe"
+          )
+          $uninstalled = $false
+          foreach ($path in $setupPaths) {
+            $EdgeInstallerPath = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($EdgeInstallerPath) {
+              Write-Host "Uninstalling Microsoft Edge using $EdgeInstallerPath..."
+              Start-Process -FilePath $EdgeInstallerPath -ArgumentList "--uninstall", "--system-level", "--verbose-logging", "--force-uninstall" -Wait -NoNewWindow
+              $uninstalled = $true
+              break
+            }
+          }
+          if (-not $uninstalled) {
+            Write-Host "Trying winget to uninstall Microsoft Edge..."
+            winget uninstall --id Microsoft.Edge --silent --accept-source-agreements --accept-package-agreements --force
+          }
+        shell: powershell
+        continue-on-error: true
+
+      # 3. Install pnpm by default (non-persistent)
       - name: Pre-install Dependencies (pnpm)
         run: |
           # Install pnpm via standalone script
@@ -35,7 +59,7 @@ jobs:
           Write-Host "✅ pnpm installed successfully."
         shell: powershell
 
-      # 3. Configure Profile Redirections to D:\persistent
+      # 4. Configure Profile Redirections to D:\persistent
       - name: Configure Session Persistence
         run: |
           # Ensure all target folders inside our persistent volume exist
@@ -65,6 +89,36 @@ jobs:
           Write-Host "✅ Created 'Persistent Chrome' shortcut on Desktop."
         shell: powershell
 
+      # 5. Install Antigravity IDE
+      - name: Install Antigravity IDE
+        run: |
+          Write-Host "Installing Antigravity CLI and IDE..."
+          irm https://antigravity.google/cli/install.ps1 | iex
+          
+          # Create Desktop shortcut for Antigravity IDE
+          $desktopPath = [Environment]::GetFolderPath("Desktop")
+          $ideExe = "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe"
+          if (Test-Path $ideExe) {
+            $wsShell = New-Object -ComObject WScript.Shell
+            $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
+            $shortcut = $wsShell.CreateShortcut($shortcutPath)
+            $shortcut.TargetPath = $ideExe
+            $shortcut.Description = "Launches Antigravity IDE"
+            $shortcut.Save()
+            Write-Host "✅ Created 'Antigravity IDE' shortcut on Desktop."
+          } else {
+            Write-Warning "Antigravity IDE executable not found at $ideExe"
+          }
+        shell: powershell
+
+      # 6. Set screen resolution to 1920x1080
+      - name: Set screen resolution
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+        shell: powershell
+        continue-on-error: true
+
+      # 7. Install TightVNC + noVNC
       - name: Install TightVNC + noVNC
         run: |
           curl.exe -L https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi -o vnc.msi
@@ -83,6 +137,7 @@ jobs:
           Expand-Archive novnc.zip -DestinationPath C:\novnc
         shell: powershell
 
+      # 8. Debug check
       - name: Debug check
         run: |
           Write-Host "=== TightVNC service ==="
@@ -93,6 +148,7 @@ jobs:
           netstat -ano | findstr :5900
         shell: powershell
 
+      # 9. Start noVNC
       - name: Start noVNC
         run: |
           Start-Process python -ArgumentList "-m websockify --web C:\novnc\noVNC-master 6080 localhost:5900" -NoNewWindow -PassThru
@@ -115,6 +171,7 @@ jobs:
           }
         shell: powershell
 
+      # 10. Start Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
           curl.exe -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -o cloudflared.exe
@@ -131,6 +188,7 @@ jobs:
           Write-Host "========================================"
         shell: powershell
 
+      # 11. Keep alive + auto-restart
       - name: Keep alive + auto-restart
         run: |
           New-Item -ItemType Directory -Force -Path D:\persistent | Out-Null
@@ -167,7 +225,7 @@ jobs:
           }
         shell: powershell
 
-      # 4. Upload any manual artifacts
+      # 12. Upload any manual artifacts
       - name: Upload session artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -176,10 +234,10 @@ jobs:
           path: D:\artifacts
           if-no-files-found: ignore
 
-      # 5. Save the updated persistent volume (Includes Chrome and Antigravity IDE configuration)
+      # 13. Save the updated persistent volume (Includes Chrome and Antigravity IDE configuration)
       - name: Save persistent drive
         if: always()
         uses: actions/cache/save@v4
         with:
           path: D:\persistent
-          key: new-vm-persistent-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          key: vm-persistent-windows-${{ github.run_id }}-${{ github.run_attempt }}

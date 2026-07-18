@@ -65,7 +65,7 @@ jobs:
           mkdir -p ~/.vnc
           echo "password" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
-          vncserver :1 -geometry 1280x720 -depth 24
+          vncserver :1 -geometry 1920x1080 -depth 24
         env:
           USER: runner
 
