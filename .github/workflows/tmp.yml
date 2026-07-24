@@ -187,8 +187,29 @@ jobs:
           Write-Host "PASSWORD: password"
           Write-Host "========================================"
         shell: powershell
+# 11. Start Cloudflare and Print URL
+      - name: Print CF
+        run: |
+          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
+          Start-Sleep -Seconds 8
+          $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
+          
+          if ($url) {
+            [Console]::WriteLine("========================================")
+            [Console]::WriteLine("NEW URL: $url/vnc.html")
+            [Console]::WriteLine("========================================")
+            [Console]::Out.Flush()
 
-      # 11. Keep alive + auto-restart
+            # Pushes the URL to the GitHub Actions main dashboard
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### 🌐 noVNC Connection URL"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "[$url/vnc.html]($url/vnc.html)"
+          } else {
+            [Console]::WriteLine("⚠️ Failed to extract Cloudflare URL on the first attempt.")
+            [Console]::Out.Flush()
+          }
+        shell: powershell
+
+      # 12. Keep alive + auto-restart
       - name: Keep alive + auto-restart
         run: |
           New-Item -ItemType Directory -Force -Path D:\persistent | Out-Null
@@ -197,27 +218,37 @@ jobs:
           while ($true) {
             if (Test-Path "D:\persistent\STOP") {
               Remove-Item "D:\persistent\STOP"
-              Write-Host "🛑 STOP detected, exiting..."
+              [Console]::WriteLine("🛑 STOP detected, exiting...")
+              [Console]::Out.Flush()
               exit 0
             }
 
+            # Check if noVNC is running; restart if it crashed
             $novnc = Get-Process python -ErrorAction SilentlyContinue
             if (-not $novnc) {
-              Write-Host "⚠️ noVNC died, restarting..."
+              [Console]::WriteLine("⚠️ noVNC died, restarting...")
+              [Console]::Out.Flush()
               Start-Process python -ArgumentList "-m websockify --web C:\novnc\noVNC-master 6080 localhost:5900" -NoNewWindow
               Start-Sleep -Seconds 3
             }
 
+            # Check if Cloudflare is running; restart if it crashed
             $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
             if (-not $cf) {
-              Write-Host "⚠️ cloudflared died, restarting..."
+              [Console]::WriteLine("⚠️ cloudflared died, restarting...")
+              [Console]::Out.Flush()
               Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
               Start-Sleep -Seconds 8
+              
               $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
+              
               if ($url) {
-                Write-Host "========================================"
-                Write-Host "NEW URL: $url/vnc.html"
-                Write-Host "========================================"
+                [Console]::WriteLine("🔄 RESTARTED URL: $url/vnc.html")
+                [Console]::Out.Flush()
+                
+                # Push the new URL to the summary if it had to restart
+                Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### 🔄 Connection Restarted"
+                Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "[$url/vnc.html]($url/vnc.html)"
               }
             }
 
