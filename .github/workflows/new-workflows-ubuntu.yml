@@ -4,59 +4,48 @@ on:
   workflow_dispatch:
 
 jobs:
-  # 1. Run independent preparation tasks in parallel
-  prepare-cache:
-    runs-on: ubuntu-latest
-    outputs:
-      cache-hit: ${{ steps.cache.outputs.cache-hit }}
-    steps:
-      - name: Restore persistent drive
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ~/persistent
-          key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            new-vm-persistent-ubuntu-
-
-  install-environment:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install desktop + VNC + noVNC + AGI IDE dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify
-          
-          # Pre-install AGI IDE repo setup
-          sudo mkdir -p /etc/apt/keyrings
-          curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
-          sudo apt update && sudo apt install -y antigravity
-
-  # 2. Main Desktop Job (Waits for parallel setup to finish if needed, or runs sequentially if everything must live on the same ephemeral runner instance)
   desktop:
-    needs: [prepare-cache, install-environment]
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      # Re-pull cache into this specific runner instance
-      - name: Restore persistent drive on main runner
-        uses: actions/cache@v4
+      # 1. Restore cache directly in the main job
+      - name: Restore persistent drive
+        uses: actions/cache/restore@v4
         with:
           path: ~/persistent
           key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             new-vm-persistent-ubuntu-
 
-      - name: Install dependencies on main runner
+      # 2. Install core desktop tools (must be foreground so VNC can start)
+      - name: Install core desktop dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify
-          curl -fsSL https://get.pnpm.io/install.sh | sh -
-          echo "$HOME/.local/share/pnpm" >> $GITHUB_PATH
 
-      # Configure Session Persistence
+      # 3. Install heavy tools in the background
+      - name: Install pnpm & antigravity (Background)
+        run: |
+          (
+            echo "Starting background installations..."
+            
+            # Install pnpm
+            curl -fsSL https://get.pnpm.io/install.sh | sh -
+            
+            # Setup Antigravity IDE repo and install
+            sudo mkdir -p /etc/apt/keyrings
+            curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y antigravity
+            
+            echo "✅ Background installations completed."
+          ) &> ~/background_install.log &
+          
+          echo "Background installation started. You can check ~/background_install.log inside the VM for progress."
+
+      # 4. Configure Session Persistence
       - name: Configure Session Persistence
         run: |
           mkdir -p ~/persistent/chrome-profile
@@ -79,9 +68,8 @@ jobs:
           echo "Terminal=false" >> ~/Desktop/chrome.desktop
           echo "StartupNotify=true" >> ~/Desktop/chrome.desktop
           chmod +x ~/Desktop/chrome.desktop
-          echo "✅ Created 'Persistent Chrome' shortcut on Desktop."
 
-      # Start VNC server
+      # 5. Start VNC server
       - name: Start VNC server
         run: |
           mkdir -p ~/.vnc
@@ -91,12 +79,12 @@ jobs:
         env:
           USER: runner
 
-      # Start noVNC
+      # 6. Start noVNC
       - name: Start noVNC
         run: |
           websockify --web /usr/share/novnc/ 6080 localhost:5901 &
 
-      # Start Cloudflare Tunnel
+      # 7. Start Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
@@ -108,7 +96,7 @@ jobs:
           grep -o 'https://.*\.trycloudflare\.com' /tmp/cloudflared.log | head -1 | sed 's|$|/vnc.html|'
           echo "========================================"
 
-      # Keep alive + auto-restart
+      # 8. Keep alive + auto-restart
       - name: Keep alive + auto-restart
         run: |
           mkdir -p ~/persistent
@@ -139,7 +127,7 @@ jobs:
             sleep 10
           done
 
-      # Save the updated persistent volume
+      # 9. Save the updated persistent volume
       - name: Save persistent drive
         if: always()
         uses: actions/cache/save@v4
