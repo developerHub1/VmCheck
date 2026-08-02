@@ -134,6 +134,3 @@ jobs:
         with:
           path: ~/persistent
           key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
-
-priotrize CF tunnel and cache restoration
-and do all jobs parallel in background 
