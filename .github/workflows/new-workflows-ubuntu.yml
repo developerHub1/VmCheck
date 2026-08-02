@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. Restore cache (Absolute Priority)
+      # 1. Restore cache directly in the main job
       - name: Restore persistent drive
         uses: actions/cache/restore@v4
         with:
@@ -18,61 +18,17 @@ jobs:
           restore-keys: |
             new-vm-persistent-ubuntu-
 
-      # 2. Install ONLY minimal networking/VNC tools to start the tunnel ASAP
-      - name: Install minimal VNC/Network tools
+      # 2. Install core desktop tools (must be foreground so VNC can start)
+      - name: Install core desktop dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y tightvncserver novnc websockify wget curl
+          sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify
 
-      # 3. Setup VNC, noVNC, and Cloudflare Tunnel immediately
-      - name: Start VNC and CF Tunnel
-        run: |
-          mkdir -p ~/.vnc
-          echo "password" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
-
-          # Custom xstartup: Shows a grey screen and waits for background XFCE installation to finish
-          cat << 'EOF' > ~/.vnc/xstartup
-          #!/bin/bash
-          xrdb $HOME/.Xresources
-          xsetroot -solid grey
-          echo "Waiting for XFCE installation to complete..."
-          while ! command -v xfce4-session >/dev/null 2>&1; do sleep 2; done
-          exec startxfce4
-          EOF
-          chmod +x ~/.vnc/xstartup
-
-          # Start VNC & noVNC
-          vncserver :1 -geometry 1920x1080 -depth 24
-          websockify --web /usr/share/novnc/ 6080 localhost:5901 &
-
-          # Start Cloudflare Tunnel
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
-          chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cloudflared.log &
-          sleep 8
-          
-          echo "========================================"
-          echo "OPEN THIS URL (Desktop will appear once background install finishes):"
-          grep -o 'https://.*\.trycloudflare\.com' /tmp/cloudflared.log | head -1 | sed 's|$|/vnc.html|'
-          echo "========================================"
-        env:
-          USER: runner
-
-      # 4. Push all heavy desktop environments and apps to the background
-      - name: Parallel Background Installations
+      # 3. Install heavy tools in the background
+      - name: Install pnpm & antigravity (Background)
         run: |
           (
-            echo "Starting heavy installations in background..."
-            
-            # Install Desktop Environment
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies
-            
-            # Install Google Chrome (Needed for your desktop shortcut)
-            wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-            sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-            sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable
+            echo "Starting background installations..."
             
             # Install pnpm
             curl -fsSL https://get.pnpm.io/install.sh | sh -
@@ -82,12 +38,14 @@ jobs:
             curl -fsSL https://us-central1-apt.pkg.dev/doc/repo-signing-key.gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/antigravity-repo-key.gpg
             echo "deb [signed-by=/etc/apt/keyrings/antigravity-repo-key.gpg] https://us-central1-apt.pkg.dev/projects/antigravity-auto-updater-dev/ antigravity-debian main" | sudo tee /etc/apt/sources.list.d/antigravity.list > /dev/null
             sudo apt-get update -y
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y antigravity
+            sudo apt-get install -y antigravity
             
-            echo "✅ Background installations completed. XFCE will now load in your VNC session."
+            echo "✅ Background installations completed."
           ) &> ~/background_install.log &
+          
+          echo "Background installation started. You can check ~/background_install.log inside the VM for progress."
 
-      # 5. Configure Session Persistence
+      # 4. Configure Session Persistence
       - name: Configure Session Persistence
         run: |
           mkdir -p ~/persistent/chrome-profile
@@ -96,23 +54,49 @@ jobs:
           mkdir -p ~/.gemini
           if [ ! -L ~/.gemini/antigravity-ide ]; then
             ln -sf ~/persistent/antigravity-ide ~/.gemini/antigravity-ide
+            echo "✅ Linked Antigravity IDE directory to persistent storage."
           fi
 
           mkdir -p ~/Desktop
-          cat << 'EOF' > ~/Desktop/chrome.desktop
-          [Desktop Entry]
-          Version=1.0
-          Type=Application
-          Name=Persistent Chrome
-          Comment=Launches Chrome with a persistent profile
-          Exec=google-chrome --user-data-dir=/home/runner/persistent/chrome-profile --no-sandbox
-          Icon=google-chrome
-          Terminal=false
-          StartupNotify=true
-          EOF
+          echo "[Desktop Entry]" > ~/Desktop/chrome.desktop
+          echo "Version=1.0" >> ~/Desktop/chrome.desktop
+          echo "Type=Application" >> ~/Desktop/chrome.desktop
+          echo "Name=Persistent Chrome" >> ~/Desktop/chrome.desktop
+          echo "Comment=Launches Chrome with a persistent profile" >> ~/Desktop/chrome.desktop
+          echo "Exec=google-chrome --user-data-dir=/home/runner/persistent/chrome-profile --no-sandbox" >> ~/Desktop/chrome.desktop
+          echo "Icon=google-chrome" >> ~/Desktop/chrome.desktop
+          echo "Terminal=false" >> ~/Desktop/chrome.desktop
+          echo "StartupNotify=true" >> ~/Desktop/chrome.desktop
           chmod +x ~/Desktop/chrome.desktop
 
-      # 6. Keep alive + auto-restart
+      # 5. Start VNC server
+      - name: Start VNC server
+        run: |
+          mkdir -p ~/.vnc
+          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          vncserver :1 -geometry 1920x1080 -depth 24
+        env:
+          USER: runner
+
+      # 6. Start noVNC
+      - name: Start noVNC
+        run: |
+          websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+
+      # 7. Start Cloudflare Tunnel
+      - name: Start Cloudflare Tunnel
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cloudflared.log &
+          sleep 8
+          echo "========================================"
+          echo "OPEN THIS URL:"
+          grep -o 'https://.*\.trycloudflare\.com' /tmp/cloudflared.log | head -1 | sed 's|$|/vnc.html|'
+          echo "========================================"
+
+      # 8. Keep alive + auto-restart
       - name: Keep alive + auto-restart
         run: |
           mkdir -p ~/persistent
@@ -143,10 +127,13 @@ jobs:
             sleep 10
           done
 
-      # 7. Save the updated persistent volume
+      # 9. Save the updated persistent volume
       - name: Save persistent drive
         if: always()
         uses: actions/cache/save@v4
         with:
           path: ~/persistent
           key: new-vm-persistent-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+
+priotrize CF tunnel and cache restoration
+and do all jobs parallel in background 
