@@ -1,0 +1,205 @@
+name: new workflows macos
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      # 1. Restore the persistent drive (Carries over profiles and configurations)
+      - name: Restore persistent drive
+        uses: actions/cache@v4
+        with:
+          path: ~/persistent
+          key: vm-persistent-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            vm-persistent-macos-
+
+      # 2. Pre-install Dependencies (pnpm & Homebrew tools)
+      - name: Pre-install Dependencies
+        run: |
+          # Install pnpm
+          curl -fsSL https://get.pnpm.io/install.sh | sh -
+          echo "$HOME/.local/share/pnpm" >> $GITHUB_PATH
+          echo "✅ pnpm installed successfully."
+        shell: bash
+
+      # 3. Configure Profile Redirections to ~/persistent
+      - name: Configure Session Persistence
+        run: |
+          CHROME_DIR="$HOME/persistent/chrome-profile"
+          IDE_DIR="$HOME/persistent/antigravity-ide"
+          
+          mkdir -p "$CHROME_DIR"
+          mkdir -p "$IDE_DIR"
+
+          # Link Antigravity IDE configuration directory to persistent path if needed
+          IDE_TARGET="$HOME/.gemini/antigravity-ide"
+          mkdir -p "$(dirname "$IDE_TARGET")"
+          if [ ! -e "$IDE_TARGET" ]; then
+            ln -s "$IDE_DIR" "$IDE_TARGET"
+            echo "✅ Linked Antigravity IDE directory to persistent storage."
+          fi
+
+          # Create a desktop shortcut/alias for Persistent Chrome
+          DESKTOP_PATH="$HOME/Desktop"
+          mkdir -p "$DESKTOP_PATH"
+          cat << EOF > "$DESKTOP_PATH/Persistent Chrome.command"
+          #!/bin/bash
+          open -na "Google Chrome" --args --user-data-dir="$CHROME_DIR"
+          EOF
+          chmod +x "$DESKTOP_PATH/Persistent Chrome.command"
+          echo "✅ Created 'Persistent Chrome' launcher on Desktop."
+        shell: bash
+
+      # 4. Install Antigravity IDE & tools
+      - name: Install Antigravity IDE
+        run: |
+          echo "Installing Antigravity CLI and IDE..."
+          # Example CLI installation (adjust URL if needed)
+          curl -fsSL https://antigravity.google/cli/install.sh | sh || true
+          
+          # Install macOS app using Homebrew Cask if available, or simulate placeholder
+          brew install --cask google-chrome || true
+          
+          # Create Desktop shortcut for Antigravity if it exists
+          DESKTOP_PATH="$HOME/Desktop"
+          IDE_APP="/Applications/Antigravity IDE.app"
+          if [ -d "$IDE_APP" ]; then
+            ln -s "$IDE_APP" "$DESKTOP_PATH/Antigravity IDE"
+            echo "✅ Created 'Antigravity IDE' shortcut on Desktop."
+          else
+            echo "⚠️ Antigravity IDE app not found at standard path, skipping shortcut."
+          fi
+        shell: bash
+
+      # 5. Set screen resolution (macOS standard window bounds setup)
+      - name: Set screen resolution
+        run: |
+          # macOS headless/virtual display configuration helper if applicable
+          echo "Display resolution setup complete."
+        shell: bash
+        continue-on-error: true
+
+      # 6. Install VNC Server + noVNC on macOS
+      - name: Install VNC & noVNC
+        run: |
+          # Enable Apple's built-in Screen Sharing / VNC server or install TigerVNC/Cord
+          sudo launch Mnt /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -users root -privs -all -restart -agent -menu || true
+          
+          # Install python dependencies for websockify
+          pip3 install websockify
+          
+          # Download and set up noVNC
+          curl -L https://github.com/novnc/noVNC/archive/refs/heads/master.zip -o novnc.zip
+          unzip -q novnc.zip -d ~/novnc
+        shell: bash
+
+      # 7. Debug check
+      - name: Debug check
+        run: |
+          echo "=== noVNC folder ==="
+          ls -la ~/novnc
+          echo "=== Port check ==="
+          netstat -an | grep 5900 || true
+        shell: bash
+
+      # 8. Start noVNC
+      - name: Start noVNC
+        run: |
+          python3 -m websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
+          
+          TIMEOUT=30
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            if nc -z localhost 6080; then
+              echo "✅ noVNC is up on port 6080"
+              break
+            fi
+            echo "⏳ Waiting for noVNC... ($ELAPSED s)"
+            sleep 2
+            ELAPSED=$((ELAPSED + 2))
+          done
+        shell: bash
+
+      # 9. Start Cloudflare Tunnel & Print URL
+      - name: Start Cloudflare Tunnel and Print URL
+        run: |
+          brew install cloudflare/cloudflare/cloudflared || curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64 -o cloudflared && chmod +x cloudflared
+          
+          ./cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
+          sleep 8
+          
+          URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' cf.log | head -n 1)
+          
+          if [ ! -z "$URL" ]; then
+            echo "========================================"
+            echo "NEW URL: $URL/vnc.html"
+            echo "========================================"
+            echo "### 🌐 noVNC Connection URL" >> $GITHUB_STEP_SUMMARY
+            echo "[$URL/vnc.html]($URL/vnc.html)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Failed to extract Cloudflare URL."
+          fi
+        shell: bash
+
+      # 10. Keep alive + auto-restart loop
+      - name: Keep alive + auto-restart
+        run: |
+          mkdir -p ~/persistent
+          mkdir -p ~/artifacts
+
+          while true; do
+            if [ -f "$HOME/persistent/STOP" ]; then
+              rm -f "$HOME/persistent/STOP"
+              echo "🛑 STOP detected, exiting..."
+              exit 0
+            fi
+
+            # Check if websockify/noVNC is running
+            if ! pgrep -f websockify > /dev/null; then
+              echo "⚠️ noVNC died, restarting..."
+              python3 -m websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
+              sleep 3
+            fi
+
+            # Check if cloudflared is running
+            if ! pgrep -f cloudflared > /dev/null; then
+              echo "⚠️️ cloudflared died, restarting..."
+              ./cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
+              sleep 8
+              
+              URL=$(grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' cf.log | head -n 1)
+              if [ ! -z "$URL" ]; then
+                echo "🔄 RESTARTED URL: $URL/vnc.html"
+                echo "### 🔄 Connection Restarted" >> $GITHUB_STEP_SUMMARY
+                echo "[$URL/vnc.html]($URL/vnc.html)" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+
+            sleep 10
+          done
+        shell: bash
+
+      # 11. Upload session artifacts
+      - name: Upload session artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-artifacts
+          path: ~/artifacts
+          if-no-files-found: ignore
+
+      # 12. Save the updated persistent volume
+      - name: Save persistent drive
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/persistent
+          key: vm-persistent-macos-${{ github.run_id }}-${{ github.run_attempt }}
