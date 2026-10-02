@@ -104,20 +104,13 @@ jobs:
           unzip -q master.zip -d ~/novnc
         shell: bash
         
-# 6.5. Create a local user account for VNC login
-      - name: Setup VNC User Account
+# 6.5. Configure built-in VNC access for the existing runner user
+      - name: Setup VNC User Password
         run: |
-          # Create a local user named 'runner' with password 'password'
-          sudo dscl . -create /Users/runner
-          sudo dscl . -create /Users/runner UserShell /bin/bash
-          sudo dscl . -create /Users/runner RealName "GitHub Runner"
-          sudo dscl . -create /Users/runner UniqueID 501
-          sudo dscl . -create /Users/runner PrimaryGroupID 20
-          sudo dscl . -create /Users/runner NFSHomeDirectory /Users/runner
-          sudo dscl . -passwd /Users/runner password
-          sudo createhomedir -c -u runner > /dev/null 2>&1 || true
+          # Set the VNC / Screen Sharing password for the active macOS user
+          echo "runner:password" | sudo chpasswd
           
-          # Grant this user full Apple Remote Desktop / VNC control privileges
+          # Enable Apple Remote Desktop / VNC control privileges for this user
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -users runner -access -on -privs -all -restart -agent -menu
         shell: bash
 
