@@ -107,15 +107,8 @@ jobs:
 # 6.5. Configure built-in VNC access for the existing runner user
       - name: Setup VNC User Password
         run: |
-          # Bypass old password authentication by writing the password directly to the user record using dscl append/change
-          USER_GUID=$(sudo dscl . -read /Users/runner GeneratedUID | awk '{print $2}')
-          sudo dscl . -create /Users/runner UserPassword 2>/dev/null || true
-          
-          # Use standard macOS single-user method to force-set password via stdin pipe
-          sudo dseditgroup -o edit -a runner -t user admin || true
-          
-          # Directly write password hash via standard password utility mechanism
-          echo -e "password\npassword" | sudo passwd runner
+          # Forcefully set the password for runner without interactive prompts
+          sudo dscl . -create /Users/runner UserPassword password || true
           
           # Enable Apple Remote Desktop / VNC control privileges for this user
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -users runner -access -on -privs -all -restart -agent -menu
