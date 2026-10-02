@@ -87,18 +87,21 @@ jobs:
         shell: bash
         continue-on-error: true
 
-      # 6. Install VNC Server + noVNC on macOS
+# 6. Install VNC Server + noVNC on macOS
       - name: Install VNC & noVNC
         run: |
-          # Enable Apple's built-in Screen Sharing / VNC server or install TigerVNC/Cord
-          sudo launch Mnt /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -users root -privs -all -restart -agent -menu || true
+          # Enable Apple's built-in Screen Sharing / VNC server correctly
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -users root -privs -all -restart -agent -menu || true
           
-          # Install python dependencies for websockify
-          pip3 install websockify
+          # Create a Python virtual environment to avoid PEP 668 restrictions
+          python3 -m venv ~/venv
+          source ~/venv/bin/activate
+          pip install --upgrade pip
+          pip install websockify
           
           # Download and set up noVNC
-          curl -L https://github.com/novnc/noVNC/archive/refs/heads/master.zip -o novnc.zip
-          unzip -q novnc.zip -d ~/novnc
+          curl -L https://github.com/novnc/noVNC/archive/refs/heads/master.zip -O
+          unzip -q master.zip -d ~/novnc
         shell: bash
 
       # 7. Debug check
@@ -110,10 +113,10 @@ jobs:
           netstat -an | grep 5900 || true
         shell: bash
 
-      # 8. Start noVNC
+# 8. Start noVNC
       - name: Start noVNC
         run: |
-          python3 -m websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
+          ~/venv/bin/websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
           
           TIMEOUT=30
           ELAPSED=0
@@ -165,7 +168,7 @@ jobs:
             # Check if websockify/noVNC is running
             if ! pgrep -f websockify > /dev/null; then
               echo "⚠️ noVNC died, restarting..."
-              python3 -m websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
+              ~/venv/bin/websockify --web ~/novnc/noVNC-master 6080 localhost:5900 &
               sleep 3
             fi
 
