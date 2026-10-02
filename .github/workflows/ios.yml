@@ -132,11 +132,11 @@ jobs:
         shell: bash
 
 # 9. Start Cloudflare Tunnel & Print URL
-      # 9. Start Cloudflare Tunnel & Print URL
       - name: Start Cloudflare Tunnel and Print URL
         run: |
-          # Download the official cloudflared binary directly without Homebrew tap restrictions
-          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64 -o cloudflared
+          # Download and extract official cloudflared archive for macOS ARM64
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz -o cloudflared.tgz
+          tar -xzf cloudflared.tgz
           chmod +x cloudflared
           
           ./cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
