@@ -107,8 +107,8 @@ jobs:
 # 6.5. Configure built-in VNC access for the existing runner user
       - name: Setup VNC User Password
         run: |
-          # Set the VNC / Screen Sharing password for the active macOS user
-          echo "runner:password" | sudo chpasswd
+          # Set the VNC / Screen Sharing password for the active runner user using macOS dscl
+          sudo dscl . -passwd /Users/runner password
           
           # Enable Apple Remote Desktop / VNC control privileges for this user
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -users runner -access -on -privs -all -restart -agent -menu
