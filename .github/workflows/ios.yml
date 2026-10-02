@@ -131,10 +131,13 @@ jobs:
           done
         shell: bash
 
+# 9. Start Cloudflare Tunnel & Print URL
       # 9. Start Cloudflare Tunnel & Print URL
       - name: Start Cloudflare Tunnel and Print URL
         run: |
-          brew install cloudflare/cloudflare/cloudflared || curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64 -o cloudflared && chmod +x cloudflared
+          # Download the official cloudflared binary directly without Homebrew tap restrictions
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64 -o cloudflared
+          chmod +x cloudflared
           
           ./cloudflared tunnel --url http://localhost:6080 > cf.log 2>&1 &
           sleep 8
