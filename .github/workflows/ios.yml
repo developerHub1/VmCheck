@@ -87,31 +87,32 @@ jobs:
         shell: bash
         continue-on-error: true
 
-# 6. Install VNC Server + noVNC on macOS
-      - name: Install VNC & noVNC
+# 6. Install VNC Server + noVNC & Create a dedicated VNC login user
+      - name: Install VNC & Setup Dedicated VNC User
         run: |
-          # Enable Apple's built-in Screen Sharing / VNC server correctly
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -users root -privs -all -restart -agent -menu || true
+          # 1. Create a dedicated local VNC user account with a clean password
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/zsh
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 502
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 20
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+          sudo dscl . -passwd /Users/vncuser password
+          sudo createhomedir -c -u vncuser > /dev/null 2>&1 || true
+          sudo dseditgroup -o edit -a vncuser -t user admin || true
+
+          # 2. Enable Apple's built-in Screen Sharing / VNC server for this user
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -users vncuser -access -on -privs -all -restart -agent -menu
           
-          # Create a Python virtual environment to avoid PEP 668 restrictions
+          # 3. Create a Python virtual environment and install websockify
           python3 -m venv ~/venv
           source ~/venv/bin/activate
           pip install --upgrade pip
           pip install websockify
           
-          # Download and set up noVNC
+          # 4. Download and set up noVNC
           curl -L https://github.com/novnc/noVNC/archive/refs/heads/master.zip -O
           unzip -q master.zip -d ~/novnc
-        shell: bash
-        
-# 6.5. Configure built-in VNC access for the existing runner user
-      - name: Setup VNC User Password
-        run: |
-          # Forcefully set the password for runner without interactive prompts
-          sudo dscl . -create /Users/runner UserPassword password || true
-          
-          # Enable Apple Remote Desktop / VNC control privileges for this user
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -users runner -access -on -privs -all -restart -agent -menu
         shell: bash
 
       # 7. Debug check
