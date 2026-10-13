@@ -93,15 +93,40 @@ jobs:
       - name: Install Antigravity IDE
         run: |
           Write-Host "Installing Antigravity CLI and IDE..."
-          irm https://antigravity.google/cli/install.ps1 | iex
-          winget install -e --id Google.AntigravityIDE
+
+          # Antigravity installs its CLI to %LOCALAPPDATA%\agy\bin, and the installer warns
+          # that the PATH is updated only for future sessions. We add it to the current process
+          # and the runner PATH immediately so follow-up commands work.
+          $cliBin = Join-Path $env:LOCALAPPDATA "agy\bin"
+          New-Item -ItemType Directory -Force -Path $cliBin | Out-Null
+          $env:Path = "$cliBin;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $cliBin
+
+          $cliExe = Join-Path $cliBin "agy.exe"
+          if (-not (Test-Path $cliExe)) {
+            Write-Host "Installing Antigravity CLI..."
+            irm https://antigravity.google/cli/install.ps1 | iex
+          }
+
+          # Use the winget source explicitly so GitHub Actions does not get stuck on the
+          # Microsoft Store legal prompt. Also disable interactive consent prompts.
+          Write-Host "Installing Antigravity IDE..."
+          winget install --id Google.AntigravityIDE --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --force
+
           reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
           reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f
-          
-          # Create Desktop shortcut for Antigravity IDE
+
+          # Create Desktop shortcut for Antigravity IDE after locating the installed exe.
           $desktopPath = [Environment]::GetFolderPath("Desktop")
-          $ideExe = "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe"
-          if (Test-Path $ideExe) {
+          $possibleExePaths = @(
+            "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe",
+            "$env:LOCALAPPDATA\Programs\Google\Antigravity IDE\Antigravity IDE.exe",
+            "$env:ProgramFiles\Antigravity IDE\Antigravity IDE.exe",
+            "$env:ProgramFiles(x86)\Antigravity IDE\Antigravity IDE.exe"
+          )
+          $ideExe = $possibleExePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+          if ($ideExe) {
             $wsShell = New-Object -ComObject WScript.Shell
             $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
             $shortcut = $wsShell.CreateShortcut($shortcutPath)
@@ -110,7 +135,19 @@ jobs:
             $shortcut.Save()
             Write-Host "✅ Created 'Antigravity IDE' shortcut on Desktop."
           } else {
-            Write-Warning "Antigravity IDE executable not found at $ideExe"
+            $matches = Get-ChildItem -Path "${env:LOCALAPPDATA}\Programs" -Recurse -Filter "Antigravity IDE.exe" -ErrorAction SilentlyContinue
+            if ($matches) {
+              $ideExe = $matches[0].FullName
+              $wsShell = New-Object -ComObject WScript.Shell
+              $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
+              $shortcut = $wsShell.CreateShortcut($shortcutPath)
+              $shortcut.TargetPath = $ideExe
+              $shortcut.Description = "Launches Antigravity IDE"
+              $shortcut.Save()
+              Write-Host "✅ Created 'Antigravity IDE' shortcut on Desktop from discovered install path."
+            } else {
+              Write-Warning "Antigravity IDE executable not found after installation. Checked: $($possibleExePaths -join ', ')"
+            }
           }
         shell: powershell
 
