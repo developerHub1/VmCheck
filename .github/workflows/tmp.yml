@@ -82,26 +82,12 @@ jobs:
           Write-Host "✅ Created 'Persistent Chrome' shortcut on Desktop."
         shell: powershell
 
-      # 5. Install Latest Standalone agy (Antigravity CLI) & IDE
-      - name: Install Latest Standalone agy & Antigravity IDE
+      # 5. Install Antigravity IDE Standalone v2.6.0 (no agy shell)
+      - name: Install Antigravity IDE Standalone v2.6.0
         run: |
-          Write-Host "Setting up agy CLI directory..."
-          $cliBin = Join-Path $env:LOCALAPPDATA "agy\bin"
-          New-Item -ItemType Directory -Force -Path $cliBin | Out-Null
-          $env:Path = "$cliBin;$env:Path"
-          Add-Content -Path $env:GITHUB_PATH -Value $cliBin
-
-          Write-Host "Downloading/Updating to the latest standalone agy CLI..."
-          try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            # Force fresh install/update of the standalone installer script
-            irm https://antigravity.google/cli/install.ps1 | iex
-          } catch {
-            Write-Warning "Standard install script encountered an issue, falling back or ensuring binary path is active: $_"
-          }
-
-          Write-Host "Installing Antigravity IDE via winget..."
-          winget install --id Google.AntigravityIDE --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --force
+          $antigravityVersion = "2.6.0"
+          Write-Host "Installing Antigravity IDE standalone v$antigravityVersion via winget..."
+          winget install --id Google.AntigravityIDE --version $antigravityVersion --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --force
           reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
           reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f
 
