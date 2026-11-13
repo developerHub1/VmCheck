@@ -20,145 +20,161 @@ jobs:
           restore-keys: |
             vm-persistent-windows-
 
-      # 2. Uninstall Microsoft Edge to prevent resource usage/interference
-      - name: Uninstall Microsoft Edge
+      # Start downloading cloudflared while the remaining setup steps run.
+      - name: Start Cloudflare download
         run: |
-          $setupPaths = @(
-            "C:\Program Files (x86)\Microsoft\Edge\Application\*\Installer\setup.exe",
-            "C:\Program Files\Microsoft\Edge\Application\*\Installer\setup.exe"
-          )
-          $uninstalled = $false
-          foreach ($path in $setupPaths) {
-            $EdgeInstallerPath = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-            if ($EdgeInstallerPath) {
-              Write-Host "Uninstalling Microsoft Edge using $EdgeInstallerPath..."
-              Start-Process -FilePath $EdgeInstallerPath -ArgumentList "--uninstall", "--system-level", "--verbose-logging", "--force-uninstall" -Wait -NoNewWindow
-              $uninstalled = $true
-              break
+          $downloadScript = Join-Path $env:RUNNER_TEMP "download-cloudflared.ps1"
+          $downloadStatus = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
+          $downloadPid = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"
+          $downloadOutLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.out.log"
+          $downloadErrorLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.err.log"
+          Remove-Item -Path $downloadStatus, $downloadPid, (Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe") -ErrorAction SilentlyContinue
+          $scriptContent = @'
+          $ErrorActionPreference = "Stop"
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $target = Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe"
+          $temporaryTarget = "$target.download"
+          $status = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              Write-Output "Downloading cloudflared (attempt $attempt/5)..."
+              Invoke-WebRequest -Uri $downloadUrl -OutFile $temporaryTarget -UseBasicParsing -TimeoutSec 120
+              if ((Test-Path $temporaryTarget) -and (Get-Item $temporaryTarget).Length -gt 1000000) {
+                Move-Item -Path $temporaryTarget -Destination $target -Force
+                Set-Content -Path $status -Value "success"
+                exit 0
+              }
+              Write-Warning "Download was incomplete or too small."
+            } catch {
+              Write-Warning "Attempt $attempt failed: $($_.Exception.Message)"
             }
+            Remove-Item -Path $temporaryTarget -ErrorAction SilentlyContinue
+            if ($attempt -lt 5) { Start-Sleep -Seconds 5 }
           }
-          if (-not $uninstalled) {
-            Write-Host "Trying winget to uninstall Microsoft Edge..."
-            winget uninstall --id Microsoft.Edge --silent --accept-source-agreements --accept-package-agreements --force
-          }
+          Set-Content -Path $status -Value "failed"
+          exit 1
+          '@
+          Set-Content -Path $downloadScript -Value $scriptContent -Encoding UTF8
+          $process = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$downloadScript`"" -RedirectStandardOutput $downloadOutLog -RedirectStandardError $downloadErrorLog -PassThru -NoNewWindow
+          Set-Content -Path $downloadPid -Value $process.Id
+          Write-Host "Started cloudflared download in background (process $($process.Id))."
         shell: powershell
-        continue-on-error: true
 
-      # 3. Run independent setup tasks concurrently after Edge's winget uninstall.
-      - name: Parallel setup (pnpm, persistence, IDE, display)
+      # 2. Uninstall Edge and install pnpm concurrently
+      - name: Uninstall Microsoft Edge and pre-install pnpm
         run: |
-          $jobs = @()
-
-          $jobs += Start-Job -Name "Install pnpm" -ScriptBlock {
-            $ErrorActionPreference = "Stop"
-            Invoke-WebRequest -Uri https://get.pnpm.io/install.ps1 -OutFile install-pnpm.ps1
-            powershell -ExecutionPolicy Bypass -File install-pnpm.ps1 -None
-            if ($LASTEXITCODE -ne 0) { throw "pnpm installer exited with code $LASTEXITCODE." }
-            $pnpmHome = "$env:LOCALAPPDATA\pnpm"
-            if (Test-Path "$pnpmHome\bin") { $pnpmHome = "$pnpmHome\bin" }
-            Add-Content -Path $env:GITHUB_PATH -Value $pnpmHome
-            Write-Host "pnpm installed successfully."
-          }
-
-          $jobs += Start-Job -Name "Configure session persistence" -ScriptBlock {
-            $ErrorActionPreference = "Stop"
-            $chromeDir = "D:\persistent\chrome-profile"
-            $ideDir = "D:\persistent\antigravity-ide"
-
-            New-Item -ItemType Directory -Force -Path $chromeDir | Out-Null
-            New-Item -ItemType Directory -Force -Path $ideDir | Out-Null
-
-            $ideTarget = "$HOME\.gemini\antigravity-ide"
-            if (!(Test-Path (Split-Path $ideTarget))) { New-Item -ItemType Directory (Split-Path $ideTarget) | Out-Null }
-            if (!(Test-Path $ideTarget)) {
-              New-Item -ItemType Junction -Path $ideTarget -Value $ideDir
-              Write-Host "Linked Antigravity IDE directory to persistent storage."
-            }
-
-            $desktopPath = [Environment]::GetFolderPath("Desktop")
-            $shortcutPath = Join-Path $desktopPath "Persistent Chrome.lnk"
-            $wsShell = New-Object -ComObject WScript.Shell
-            $shortcut = $wsShell.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-            $shortcut.Arguments = "--user-data-dir=`"$chromeDir`""
-            $shortcut.Description = "Launches Chrome with a persistent profile stored on D:\"
-            $shortcut.Save()
-            Write-Host "Created 'Persistent Chrome' shortcut on Desktop."
-          }
-
-          $jobs += Start-Job -Name "Install Antigravity IDE" -ScriptBlock {
-            $ErrorActionPreference = "Stop"
-            $antigravityVersion = "2.6.0"
-            $antigravityUrl = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/2.6.0-5526304964083712/windows-x64/Antigravity%20IDE.exe"
-            $installerPath = Join-Path $env:TEMP "AntigravityIDE-$antigravityVersion.exe"
-
-            Write-Host "Downloading Antigravity IDE v$antigravityVersion from the official Edge CDN..."
-            Invoke-WebRequest -Uri $antigravityUrl -OutFile $installerPath
-            if (-not (Test-Path $installerPath)) {
-              throw "Antigravity IDE installer was not downloaded to $installerPath"
-            }
-
-            Write-Host "Installing Antigravity IDE v$antigravityVersion..."
-            Start-Process -FilePath $installerPath -ArgumentList "/S", "/NORESTART" -Wait -NoNewWindow
-
-            reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
-            reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f
-
-            $desktopPath = [Environment]::GetFolderPath("Desktop")
-            $possibleExePaths = @(
-              "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe",
-              "$env:LOCALAPPDATA\Programs\Google\Antigravity IDE\Antigravity IDE.exe",
-              "$env:ProgramFiles\Antigravity IDE\Antigravity IDE.exe",
-              "$env:ProgramFiles(x86)\Antigravity IDE\Antigravity IDE.exe"
+          $edgeJob = Start-Job -ScriptBlock {
+            $setupPaths = @(
+              "C:\Program Files (x86)\Microsoft\Edge\Application\*\Installer\setup.exe",
+              "C:\Program Files\Microsoft\Edge\Application\*\Installer\setup.exe"
             )
-            $ideExe = $possibleExePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-            if ($ideExe) {
+            $uninstalled = $false
+            foreach ($path in $setupPaths) {
+              $edgeInstallerPath = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+              if ($edgeInstallerPath) {
+                Write-Host "Uninstalling Microsoft Edge using $edgeInstallerPath..."
+                Start-Process -FilePath $edgeInstallerPath -ArgumentList "--uninstall", "--system-level", "--verbose-logging", "--force-uninstall" -Wait -NoNewWindow
+                $uninstalled = $true
+                break
+              }
+            }
+            if (-not $uninstalled) {
+              Write-Host "Trying winget to uninstall Microsoft Edge..."
+              winget uninstall --id Microsoft.Edge --silent --accept-source-agreements --accept-package-agreements --force
+            }
+          }
+
+          Invoke-WebRequest -Uri https://get.pnpm.io/install.ps1 -OutFile install-pnpm.ps1
+          powershell -ExecutionPolicy Bypass -File install-pnpm.ps1 -None
+          $pnpmHome = "$env:LOCALAPPDATA\pnpm"
+          if (Test-Path "$pnpmHome\bin") { $pnpmHome = "$pnpmHome\bin" }
+          Add-Content -Path $env:GITHUB_PATH -Value $pnpmHome
+          Write-Host "✅ pnpm installed successfully."
+
+          Wait-Job -Job $edgeJob | Out-Null
+          try {
+            Receive-Job -Job $edgeJob -ErrorAction Stop
+          } catch {
+            Write-Warning "Microsoft Edge uninstall failed: $($_.Exception.Message)"
+          }
+          Remove-Job -Job $edgeJob
+        shell: powershell
+
+      # 4. Configure Profile Redirections to D:\persistent
+      - name: Configure Session Persistence
+        run: |
+          $chromeDir = "D:\persistent\chrome-profile"
+          $ideDir = "D:\persistent\antigravity-ide"
+          
+          New-Item -ItemType Directory -Force -Path $chromeDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $ideDir | Out-Null
+          $ideTarget = "$HOME\.gemini\antigravity-ide"
+          if (!(Test-Path (Split-Path $ideTarget))) { New-Item -ItemType Directory (Split-Path $ideTarget) | Out-Null }
+          if (!(Test-Path $ideTarget)) {
+            New-Item -ItemType Junction -Path $ideTarget -Value $ideDir
+            Write-Host "✅ Linked Antigravity IDE directory to persistent storage."
+          }
+          $desktopPath = [Environment]::GetFolderPath("Desktop")
+          $shortcutPath = Join-Path $desktopPath "Persistent Chrome.lnk"
+          $wsShell = New-Object -ComObject WScript.Shell
+          $shortcut = $wsShell.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          $shortcut.Arguments = "--user-data-dir=`"$chromeDir`""
+          $shortcut.Description = "Launches Chrome with a persistent profile stored on D:\"
+          $shortcut.Save()
+          Write-Host "✅ Created 'Persistent Chrome' shortcut on Desktop."
+        shell: powershell
+
+      # 5. Install Antigravity IDE Standalone v2.6.0 (no agy shell)
+      - name: Install Antigravity IDE Standalone v2.6.0
+        run: |
+          $antigravityVersion = "2.6.0"
+          Write-Host "Installing Antigravity IDE standalone v$antigravityVersion via winget..."
+          winget install --id Google.AntigravityIDE --version $antigravityVersion --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --force
+          reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v SystemUsesLightTheme /t REG_DWORD /d 0 /f
+          reg add HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize /v AppsUseLightTheme /t REG_DWORD /d 0 /f
+          $desktopPath = [Environment]::GetFolderPath("Desktop")
+          $possibleExePaths = @(
+            "$env:LOCALAPPDATA\Programs\Antigravity IDE\Antigravity IDE.exe",
+            "$env:LOCALAPPDATA\Programs\Google\Antigravity IDE\Antigravity IDE.exe",
+            "$env:ProgramFiles\Antigravity IDE\Antigravity IDE.exe",
+            "$env:ProgramFiles(x86)\Antigravity IDE\Antigravity IDE.exe"
+          )
+          $ideExe = $possibleExePaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if ($ideExe) {
+            $wsShell = New-Object -ComObject WScript.Shell
+            $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
+            $shortcut = $wsShell.CreateShortcut($shortcutPath)
+            $shortcut.TargetPath = $ideExe
+            $shortcut.Description = "Launches Antigravity IDE"
+            $shortcut.Save()
+            Write-Host "✅ Created 'Antigravity IDE' shortcut on Desktop."
+          } else {
+            $matches = Get-ChildItem -Path "${env:LOCALAPPDATA}\Programs" -Recurse -Filter "Antigravity IDE.exe" -ErrorAction SilentlyContinue
+            if ($matches) {
+              $ideExe = $matches[0].FullName
               $wsShell = New-Object -ComObject WScript.Shell
               $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
               $shortcut = $wsShell.CreateShortcut($shortcutPath)
               $shortcut.TargetPath = $ideExe
               $shortcut.Description = "Launches Antigravity IDE"
               $shortcut.Save()
-              Write-Host "Created 'Antigravity IDE' shortcut on Desktop."
+              Write-Host "✅ Created 'Antigravity IDE' shortcut on Desktop from discovered install path."
             } else {
-              $matches = Get-ChildItem -Path "${env:LOCALAPPDATA}\Programs" -Recurse -Filter "Antigravity IDE.exe" -ErrorAction SilentlyContinue
-              if ($matches) {
-                $ideExe = $matches[0].FullName
-                $wsShell = New-Object -ComObject WScript.Shell
-                $shortcutPath = Join-Path $desktopPath "Antigravity IDE.lnk"
-                $shortcut = $wsShell.CreateShortcut($shortcutPath)
-                $shortcut.TargetPath = $ideExe
-                $shortcut.Description = "Launches Antigravity IDE"
-                $shortcut.Save()
-                Write-Host "Created 'Antigravity IDE' shortcut on Desktop from discovered install path."
-              } else {
-                Write-Warning "Antigravity IDE executable not found after installation."
-              }
+              Write-Warning "Antigravity IDE executable not found after installation."
             }
-          }
-
-          $jobs += Start-Job -Name "Set screen resolution" -ScriptBlock {
-            try {
-              Set-DisplayResolution -Width 1920 -Height 1080 -Force
-            } catch {
-              Write-Warning "Could not set screen resolution: $($_.Exception.Message)"
-            }
-          }
-
-          try {
-            Wait-Job -Job $jobs | Out-Null
-            foreach ($job in $jobs) {
-              Receive-Job -Job $job
-              if ($job.State -ne "Completed") {
-                throw "Setup task '$($job.Name)' failed with state $($job.State)."
-              }
-            }
-          } finally {
-            Remove-Job -Job $jobs -Force
           }
         shell: powershell
 
-      # 4. Install TightVNC + noVNC
+      # 6. Set screen resolution to 1920x1080
+      - name: Set screen resolution
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+        shell: powershell
+        continue-on-error: true
+
+      # 7. Install TightVNC + noVNC
       - name: Install TightVNC + noVNC
         run: |
           curl.exe -L https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi -o vnc.msi
@@ -170,15 +186,12 @@ jobs:
           Restart-Service -Name "tvnserver" -Force
           Start-Sleep -Seconds 3
           pip install websockify
-
           $novncRoot = "C:\novnc"
           $novncDir = Join-Path $novncRoot "noVNC-master"
           New-Item -ItemType Directory -Force -Path $novncRoot | Out-Null
           if (Test-Path $novncDir) { Remove-Item -Recurse -Force $novncDir }
-
           Write-Host "Cloning noVNC from GitHub..."
           git clone --depth 1 https://github.com/novnc/noVNC.git $novncDir
-
           if (-not (Test-Path (Join-Path $novncDir "vnc.html"))) {
             throw "noVNC checkout did not contain vnc.html at $novncDir"
           }
@@ -218,42 +231,33 @@ jobs:
           }
         shell: powershell
 
-      # 10. Start Cloudflare Tunnel (with retry-safe download and validation)
+      # 10. Start Cloudflare Tunnel after the background download completes
       - name: Start Cloudflare Tunnel
         run: |
-          Remove-Item -Path "cloudflared.exe" -ErrorAction SilentlyContinue
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $maxAttempts = 5
-          $downloaded = $false
-
-          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            try {
-              Write-Host "Downloading cloudflared (attempt $attempt/$maxAttempts)..."
-              Invoke-WebRequest -Uri $downloadUrl -OutFile "cloudflared.exe" -UseBasicParsing
-              if (Test-Path "cloudflared.exe") {
-                $fileSize = (Get-Item "cloudflared.exe").Length
-                if ($fileSize -gt 1000000) {
-                  $downloaded = $true
-                  break
-                }
-              }
-              Write-Warning "cloudflared download incomplete or too small (size: $fileSize bytes)."
-            } catch {
-              Write-Warning "Attempt $attempt failed: $($_.Exception.Message)"
+          $downloadStatus = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
+          $downloadPid = [int](Get-Content (Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"))
+          $downloadOutLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.out.log"
+          $downloadErrorLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.err.log"
+          $timeout = 900
+          $elapsed = 0
+          while (-not (Test-Path $downloadStatus) -and $elapsed -lt $timeout) {
+            if (-not (Get-Process -Id $downloadPid -ErrorAction SilentlyContinue)) {
+              break
             }
-
-            if ($attempt -lt $maxAttempts) {
-              Start-Sleep -Seconds 5
-            }
+            Start-Sleep -Seconds 2
+            $elapsed += 2
           }
-
-          if (-not $downloaded) {
-            Write-Error "cloudflared download failed after $maxAttempts attempts."
-            exit 1
+          if (-not (Test-Path $downloadStatus) -or (Get-Content $downloadStatus -Raw).Trim() -ne "success") {
+            Write-Host "=== cloudflared download output ==="
+            Get-Content $downloadOutLog -ErrorAction SilentlyContinue
+            Get-Content $downloadErrorLog -ErrorAction SilentlyContinue
+            throw "cloudflared background download did not complete successfully."
           }
-
+          $cloudflaredPath = Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe"
+          if (-not (Test-Path $cloudflaredPath) -or (Get-Item $cloudflaredPath).Length -le 1000000) {
+            throw "cloudflared download completed but the executable is missing or invalid."
+          }
+          Remove-Item -Path $downloadStatus, (Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"), (Join-Path $env:RUNNER_TEMP "download-cloudflared.ps1"), $downloadOutLog, $downloadErrorLog -ErrorAction SilentlyContinue
           Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardOutput "cf-out.log" -RedirectStandardError "cf.log" -NoNewWindow
           Start-Sleep -Seconds 10
           Write-Host "=== STDOUT ==="
@@ -271,10 +275,9 @@ jobs:
           Write-Host "========================================"
         shell: powershell
 
-      # 11. Start Cloudflare and Print URL
-      - name: Print CF
+      # 11. Print the Cloudflare URL
+      - name: Print Cloudflare URL
         run: |
-          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
           Start-Sleep -Seconds 8
           $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
           if ($url) {
