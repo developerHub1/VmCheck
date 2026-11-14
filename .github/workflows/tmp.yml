@@ -142,8 +142,14 @@ jobs:
       # 7. Install TightVNC + noVNC
       - name: Install TightVNC + noVNC
         run: |
-          curl.exe -L https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi -o vnc.msi
-          msiexec /i vnc.msi /quiet ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=password
+          $vncMsi = Join-Path $env:GITHUB_WORKSPACE "windows\tightvnc.msi"
+          if (-not (Test-Path $vncMsi)) {
+            throw "Bundled TightVNC installer was not found at $vncMsi."
+          }
+          $install = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$vncMsi`" /quiet ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=password" -Wait -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) {
+            throw "TightVNC installation failed with exit code $($install.ExitCode)."
+          }
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "LoopbackOnly" -Value 0
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AllowLoopback" -Value 1
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AcceptRfbConnections" -Value 1
@@ -198,7 +204,7 @@ jobs:
       # 10. Start the bundled Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
-          $cfPath = Join-Path $env:GITHUB_WORKSPACE "cloudflare\cf.exe"
+          $cfPath = Join-Path $env:GITHUB_WORKSPACE "windows\cf.exe"
           if (-not (Test-Path $cfPath)) {
             throw "Bundled Cloudflare executable was not found at $cfPath."
           }
@@ -276,7 +282,7 @@ jobs:
             if (-not $cf) {
               [Console]::WriteLine("⚠️ Cloudflare tunnel died, restarting...")
               [Console]::Out.Flush()
-              Start-Process -FilePath (Join-Path $env:GITHUB_WORKSPACE "cloudflare\cf.exe") -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
+              Start-Process -FilePath (Join-Path $env:GITHUB_WORKSPACE "windows\cf.exe") -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
               Start-Sleep -Seconds 8
               $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
               if ($url) {
