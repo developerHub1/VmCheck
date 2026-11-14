@@ -11,6 +11,19 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up pnpm 12
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
       # 1. Restore the persistent drive (Carries over Chrome and Antigravity IDE config)
       - name: Restore persistent drive
         uses: actions/cache@v4
@@ -20,49 +33,8 @@ jobs:
           restore-keys: |
             vm-persistent-windows-
 
-      # Start downloading cloudflared while the remaining setup steps run.
-      - name: Start Cloudflare download
-        run: |
-          $downloadScript = Join-Path $env:RUNNER_TEMP "download-cloudflared.ps1"
-          $downloadStatus = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
-          $downloadPid = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"
-          $downloadOutLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.out.log"
-          $downloadErrorLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.err.log"
-          Remove-Item -Path $downloadStatus, $downloadPid, (Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe") -ErrorAction SilentlyContinue
-          $scriptContent = @'
-          $ErrorActionPreference = "Stop"
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $target = Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe"
-          $temporaryTarget = "$target.download"
-          $status = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            try {
-              Write-Output "Downloading cloudflared (attempt $attempt/5)..."
-              Invoke-WebRequest -Uri $downloadUrl -OutFile $temporaryTarget -UseBasicParsing -TimeoutSec 120
-              if ((Test-Path $temporaryTarget) -and (Get-Item $temporaryTarget).Length -gt 1000000) {
-                Move-Item -Path $temporaryTarget -Destination $target -Force
-                Set-Content -Path $status -Value "success"
-                exit 0
-              }
-              Write-Warning "Download was incomplete or too small."
-            } catch {
-              Write-Warning "Attempt $attempt failed: $($_.Exception.Message)"
-            }
-            Remove-Item -Path $temporaryTarget -ErrorAction SilentlyContinue
-            if ($attempt -lt 5) { Start-Sleep -Seconds 5 }
-          }
-          Set-Content -Path $status -Value "failed"
-          exit 1
-          '@
-          Set-Content -Path $downloadScript -Value $scriptContent -Encoding UTF8
-          $process = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$downloadScript`"" -RedirectStandardOutput $downloadOutLog -RedirectStandardError $downloadErrorLog -PassThru -NoNewWindow
-          Set-Content -Path $downloadPid -Value $process.Id
-          Write-Host "Started cloudflared download in background (process $($process.Id))."
-        shell: powershell
-
-      # 2. Uninstall Edge and install pnpm concurrently
-      - name: Uninstall Microsoft Edge and pre-install pnpm
+      # 2. Uninstall Microsoft Edge
+      - name: Uninstall Microsoft Edge
         run: |
           $edgeJob = Start-Job -ScriptBlock {
             $setupPaths = @(
@@ -84,13 +56,6 @@ jobs:
               winget uninstall --id Microsoft.Edge --silent --accept-source-agreements --accept-package-agreements --force
             }
           }
-
-          Invoke-WebRequest -Uri https://get.pnpm.io/install.ps1 -OutFile install-pnpm.ps1
-          powershell -ExecutionPolicy Bypass -File install-pnpm.ps1 -None
-          $pnpmHome = "$env:LOCALAPPDATA\pnpm"
-          if (Test-Path "$pnpmHome\bin") { $pnpmHome = "$pnpmHome\bin" }
-          Add-Content -Path $env:GITHUB_PATH -Value $pnpmHome
-          Write-Host "✅ pnpm installed successfully."
 
           Wait-Job -Job $edgeJob | Out-Null
           try {
@@ -179,12 +144,11 @@ jobs:
         run: |
           curl.exe -L https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi -o vnc.msi
           msiexec /i vnc.msi /quiet ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=password
-          Start-Sleep -Seconds 5
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "LoopbackOnly" -Value 0
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AllowLoopback" -Value 1
           Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AcceptRfbConnections" -Value 1
           Restart-Service -Name "tvnserver" -Force
-          Start-Sleep -Seconds 3
+          (Get-Service -Name "tvnserver" -ErrorAction Stop).WaitForStatus("Running", [TimeSpan]::FromSeconds(30))
           pip install websockify
           $novncRoot = "C:\novnc"
           $novncDir = Join-Path $novncRoot "noVNC-master"
@@ -231,40 +195,28 @@ jobs:
           }
         shell: powershell
 
-      # 10. Start Cloudflare Tunnel after the background download completes
+      # 10. Start the bundled Cloudflare Tunnel
       - name: Start Cloudflare Tunnel
         run: |
-          $downloadStatus = Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.status"
-          $downloadPid = [int](Get-Content (Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"))
-          $downloadOutLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.out.log"
-          $downloadErrorLog = Join-Path $env:RUNNER_TEMP "cloudflared-download.err.log"
-          $timeout = 900
+          $cfPath = Join-Path $env:GITHUB_WORKSPACE "cloudflare\cf.exe"
+          if (-not (Test-Path $cfPath)) {
+            throw "Bundled Cloudflare executable was not found at $cfPath."
+          }
+          Start-Process -FilePath $cfPath -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardOutput "cf-out.log" -RedirectStandardError "cf.log" -NoNewWindow
+          $timeout = 10
           $elapsed = 0
-          while (-not (Test-Path $downloadStatus) -and $elapsed -lt $timeout) {
-            if (-not (Get-Process -Id $downloadPid -ErrorAction SilentlyContinue)) {
-              break
+          $url = $null
+          while (-not $url -and $elapsed -lt $timeout) {
+            $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
+            if (-not $url) {
+              Start-Sleep -Seconds 2
+              $elapsed += 2
             }
-            Start-Sleep -Seconds 2
-            $elapsed += 2
           }
-          if (-not (Test-Path $downloadStatus) -or (Get-Content $downloadStatus -Raw).Trim() -ne "success") {
-            Write-Host "=== cloudflared download output ==="
-            Get-Content $downloadOutLog -ErrorAction SilentlyContinue
-            Get-Content $downloadErrorLog -ErrorAction SilentlyContinue
-            throw "cloudflared background download did not complete successfully."
-          }
-          $cloudflaredPath = Join-Path $env:GITHUB_WORKSPACE "cloudflared.exe"
-          if (-not (Test-Path $cloudflaredPath) -or (Get-Item $cloudflaredPath).Length -le 1000000) {
-            throw "cloudflared download completed but the executable is missing or invalid."
-          }
-          Remove-Item -Path $downloadStatus, (Join-Path $env:GITHUB_WORKSPACE "cloudflared-download.pid"), (Join-Path $env:RUNNER_TEMP "download-cloudflared.ps1"), $downloadOutLog, $downloadErrorLog -ErrorAction SilentlyContinue
-          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardOutput "cf-out.log" -RedirectStandardError "cf.log" -NoNewWindow
-          Start-Sleep -Seconds 10
           Write-Host "=== STDOUT ==="
           Get-Content cf-out.log -ErrorAction SilentlyContinue
           Write-Host "=== STDERR ==="
           Get-Content cf.log -ErrorAction SilentlyContinue
-          $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
           Write-Host "========================================"
           if ($url) {
             Write-Host "OPEN: $url/vnc.html"
@@ -278,8 +230,16 @@ jobs:
       # 11. Print the Cloudflare URL
       - name: Print Cloudflare URL
         run: |
-          Start-Sleep -Seconds 8
-          $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
+          $timeout = 8
+          $elapsed = 0
+          $url = $null
+          while (-not $url -and $elapsed -lt $timeout) {
+            $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
+            if (-not $url) {
+              Start-Sleep -Seconds 2
+              $elapsed += 2
+            }
+          }
           if ($url) {
             [Console]::WriteLine("========================================")
             [Console]::WriteLine("NEW URL: $url/vnc.html")
@@ -312,11 +272,11 @@ jobs:
               Start-Process python -ArgumentList "-m websockify --web C:\novnc\noVNC-master 6080 localhost:5900" -NoNewWindow
               Start-Sleep -Seconds 3
             }
-            $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+            $cf = Get-Process cf -ErrorAction SilentlyContinue
             if (-not $cf) {
-              [Console]::WriteLine("⚠️ cloudflared died, restarting...")
+              [Console]::WriteLine("⚠️ Cloudflare tunnel died, restarting...")
               [Console]::Out.Flush()
-              Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
+              Start-Process -FilePath (Join-Path $env:GITHUB_WORKSPACE "cloudflare\cf.exe") -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardError "cf.log" -NoNewWindow
               Start-Sleep -Seconds 8
               $url = Get-Content cf.log -ErrorAction SilentlyContinue | Select-String 'https://.*\.trycloudflare\.com' | ForEach-Object { $_.Matches.Value } | Select-Object -First 1
               if ($url) {
